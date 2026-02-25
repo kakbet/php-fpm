@@ -20,6 +20,7 @@ XLISTEN=9000
 XLISTEN_OWNER=$XUSER
 XLISTEN_GROUP=$XGROUP
 
+if [[ -z "$PHP_FPM_ACCESS_LOG" ]]; then export PHP_FPM_ACCESS_LOG="/dev/null"; fi
 if [[ -z "$PHP_FPM_LISTEN" ]]; then export PHP_FPM_LISTEN=$XLISTEN; fi
 if [[ -z "$PHP_FPM_USER" ]]; then export PHP_FPM_USER=$XUSER; fi
 if [[ -z "$PHP_FPM_GROUP" ]]; then export PHP_FPM_GROUP=$XGROUP; fi
