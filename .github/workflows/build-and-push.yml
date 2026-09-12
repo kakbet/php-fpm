@@ -7,6 +7,11 @@ on:
   pull_request:
     branches:
       - main
+  # Without this the workflow can only be reached by a push to main, so a
+  # branch could never be built at all — and this image is the BASE that
+  # sb/sportsbook-backoffice builds FROM, so it has to be buildable ahead of
+  # its consumer.
+  workflow_dispatch:
 
 env:
   AWS_REGION: eu-central-1
@@ -15,7 +20,9 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    # The GitHub-hosted pool is billing-blocked on this org: jobs queue and
+    # never start. Every sibling repo builds on the self-hosted pool.
+    runs-on: [self-hosted, Linux]
     
     permissions:
       contents: write  # Git tag oluşturmak için
@@ -62,11 +69,36 @@ jobs:
         echo "$NEW_VERSION" > VERSION
         
         # Git tag oluştur ve push et
-        git tag "$NEW_VERSION"
-        git push origin "$NEW_VERSION"
+        # 🔴 A release tag is a production name and this workflow is now
+        # dispatchable from ANY ref, so off the default branch the tag is
+        # neither created nor pushed. The version NUMBER is still produced —
+        # the image is tagged with it — but nothing is published.
+        if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+          echo "::notice::branch run ($GITHUB_REF) — release tag $NEW_VERSION NOT created or pushed."
+        else
+          git tag "$NEW_VERSION"
+          git push origin "$NEW_VERSION"
+        fi
         
         # Output olarak ver
         echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    # 🪤 ORDER: isolate BEFORE buildx. buildx keeps builder state under
+    # $DOCKER_CONFIG/buildx; isolate later and the builder lands in the SHARED
+    # directory while the build looks in the isolated one.
+    # WHY: every runner on this host shares HOME, so one ~/.docker/config.json
+    # is shared state between concurrent jobs and amazon-ecr-login's post step
+    # DELETES the credentials it wrote — measured in a sibling repo as a
+    # `401 Unauthorized` on the push of an already-built image.
+    - name: Isolate Docker config for this job
+      run: |
+        cfg="$RUNNER_TEMP/docker-$GITHUB_RUN_ID-$GITHUB_JOB"
+        mkdir -p "$cfg"
+        echo '{}' > "$cfg/config.json"
+        echo "DOCKER_CONFIG=$cfg" >> "$GITHUB_ENV"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
@@ -79,15 +111,43 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build Docker image
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.version.outputs.version }} .
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+    - name: Prepare Tags
+      id: tags
+      # 🔴 `:latest` was applied unconditionally, and this image is the BASE
+      # that sb/sportsbook-backoffice builds FROM (`FROM <base>:latest`), so a
+      # branch run here would have changed what the CONSUMER compiles against.
+      # The decision now comes from scripts/ci/prepare-image-tags.sh, the same
+      # file the sibling repos use.
+      # VERSION_SOURCE=allocated: the version step picks this version in THIS
+      # run and proves it free, so the already-released guard must not fire on
+      # the tag it just created.
+      env:
+        VERSION_VALUE: ${{ steps.version.outputs.version }}
+        VERSION_SOURCE: allocated
+        TAG_STYLE: docker-args
+      run: ./scripts/ci/prepare-image-tags.sh >> "$GITHUB_OUTPUT"
 
-    - name: Push Docker image
+    - name: Build and push Docker image
+      # 🔴 ONE buildx step replaces `docker build` x2 + `docker push` x2. A
+      # multi-architecture build produces a manifest LIST and the local Docker
+      # daemon cannot hold one, so the old form would either silently collapse
+      # to a single architecture or fail on load. `--push` writes the list
+      # straight to the registry, the only place it can live.
+      # This image is PHP: the arm64 leg runs its extension builds under QEMU
+      # emulation and is materially slower than the amd64 leg — a previous
+      # measurement on this host put an arm64 php-fpm build at 44m58s.
       run: |
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ steps.version.outputs.version }}
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker buildx build \
+          --push \
+          --platform linux/amd64,linux/arm64 \
+          --progress=plain \
+          ${{ steps.tags.outputs.docker_args }} \
+          .
+        echo "pushed: ${{ steps.tags.outputs.tags }}"
+
+    - name: Verify the pushed manifest
+      run: |
+        docker buildx imagetools inspect "${{ steps.tags.outputs.image_url }}"
 
     - name: Update build name
       run: echo "::notice title=Build Complete::Successfully built and pushed version ${{ steps.version.outputs.version }}"
