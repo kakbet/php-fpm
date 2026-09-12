@@ -60,13 +60,29 @@ emit_tags() {
 
   if [ "$is_main" = true ]; then
     primary="${INPUT_TAG:-}"
-    [ -n "$primary" ] || primary="$short_sha"
+    if [ -z "$primary" ]; then
+      if [ "${VERSION_SOURCE:-file}" = "allocated" ]; then
+        # An upstream job allocated this version FOR THIS RUN, so the version is
+        # this build's identity: it is the primary tag and `image_url` names it.
+        # Making the short SHA primary here silently changed `image_url` from
+        # `:<version>` to `:<sha>` for every caller that reports or pins it.
+        primary="$version"
+      else
+        # With a checked-in VERSION file the same commit can be rebuilt at the
+        # same version, so the per-run identity is the commit, not the version.
+        primary="$short_sha"
+      fi
+    fi
 
     # A version carrying the test marker names a test channel, not a release:
     # it moves `:test` and must never touch `:latest` or cut a release.
     if [ -n "${TEST_MARKER:-}" ] && case "$version" in *"$TEST_MARKER"*) true ;; *) false ;; esac; then
       released=true
-      tags="${image_base}:${primary},${image_base}:${version},${image_base}:test"
+      tags="${image_base}:${primary}"
+      # `<version>` only when it is not already the primary tag — an allocated
+      # version would otherwise appear twice in the list.
+      [ "$primary" = "$version" ] || tags="${tags},${image_base}:${version}"
+      tags="${tags},${image_base}:test"
     elif [ "${VERSION_SOURCE:-file}" = "allocated" ] \
          || ! git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
       # Two genuinely different situations, not one with an exception:
@@ -81,7 +97,9 @@ emit_tags() {
       #               created it, so the collision guard would suppress exactly
       #               the tags the run exists to publish.
       released=false
-      tags="${image_base}:${primary},${image_base}:${version},${image_base}:latest"
+      tags="${image_base}:${primary}"
+      [ "$primary" = "$version" ] || tags="${tags},${image_base}:${version}"
+      tags="${tags},${image_base}:latest"
     else
       released=true
       tags="${image_base}:${primary}"
@@ -264,6 +282,13 @@ selftest() {
   _check ALLOCATED ':latest yine basilir'           'sb/app:latest' "$out"
   _check ALLOCATED ':<version> yine basilir'        'sb/app:0.2.0'  "$out"
   _check ALLOCATED 'release serbest'                'already_released=false' "$out"
+
+  _count() { printf '%s' "$1" | sed -n 's/^tags=//p' | tr ',' '\n' | grep -c . ; }
+  _check ALLOCATED 'image_url SURUMU gosterir'      'image_url=reg.example.invalid/sb/app:0.2.0' "$out"
+  _check ALLOCATED 'birincil etiket surum'          'primary_tag=0.2.0' "$out"
+  _refute ALLOCATED 'kisa sha etiketi EKLENMEDI'    'sb/app:abcdef1' "$out"
+  if [ "$(_count "$out")" = "2" ]; then pass=$((pass+1)); else
+    fail=$((fail+1)); printf '  FAIL  ALLOCATED: etiket sayisi 2 olmali, %s\n' "$(_count "$out")" >&2; fi
 
   # ALLOCATED-BRANCH — allocation does not buy a way past the branch fence.
   out="$(VERSION_SOURCE=allocated _run allocated-br 0.2.0 v0.2.0 refs/heads/topic topic '')"
