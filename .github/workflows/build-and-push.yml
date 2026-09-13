@@ -147,7 +147,16 @@ jobs:
 
     - name: Verify the pushed manifest
       run: |
-        docker buildx imagetools inspect "${{ steps.tags.outputs.image_url }}"
+        # 🔴 `imagetools inspect` tek basina DENETIM DEGILDIR: cikti basar ve her
+        # halukarda rc 0 doner. Olculdu: bu korpusta 8 cagrinin 8'i denetimsizdi ve
+        # bir kardes depoda etiketin sessizce tek mimarili kalmasini gorunmez kilan
+        # sey tam olarak buydu. Manifest'te arm64 YOKSA burada DURUYORUZ.
+        _arch_out="$(docker buildx imagetools inspect "${{ steps.tags.outputs.image_url }}")"
+        printf '%s\n' "$_arch_out"
+        if ! printf '%s' "$_arch_out" | grep -q 'linux/arm64'; then
+          echo "::error::manifest has NO linux/arm64 — the dual-arch publish silently degraded"
+          exit 1
+        fi
 
     - name: Update build name
       run: echo "::notice title=Build Complete::Successfully built and pushed version ${{ steps.version.outputs.version }}"
