@@ -20,6 +20,20 @@ env:
 
 jobs:
   build-and-push:
+    # 🔴 FORK GUARD. This is the only PR-triggered job in the org that lands on
+    # the self-hosted pool, and those runners execute as a uid in the `docker`
+    # group on the Harbor host — a fork PR's code would run root-equivalent
+    # there. A fork PR must never reach this job.
+    #
+    # 🪤 NOT the bare `github.event.pull_request.head.repo.full_name ==
+    # github.repository`: on `push` and `workflow_dispatch` there is no
+    # `pull_request` object, that side evaluates to null, and the ONLY job in
+    # this workflow would be skipped — i.e. the bare form silently stops
+    # publishing on main and breaks the dispatch builds this repo actually uses.
+    # The event_name arm lets non-PR events through untouched.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     # The GitHub-hosted pool is billing-blocked on this org: jobs queue and
     # never start. Every sibling repo builds on the self-hosted pool.
     runs-on: [self-hosted, Linux]
