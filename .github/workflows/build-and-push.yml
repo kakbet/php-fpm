@@ -347,7 +347,8 @@ jobs:
           out="$(docker buildx imagetools inspect "$ref")"
           for q in "${want[@]}"; do
             printf '%s\n' "$out" | grep -q "Platform:  *$q\$" \
-              || { echo "::error::$ref does not advertise $q"; exit 1; }
+              || { printf '%s\n' "$out"
+                   echo "::error::$ref does not advertise $q"; exit 1; }
           done
           echo "OK: $ref advertises ${want[*]}"
         done
