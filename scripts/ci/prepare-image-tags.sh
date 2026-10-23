@@ -24,7 +24,9 @@
 #
 # Inputs (environment):
 #   GITHUB_REF, GITHUB_REF_NAME, GITHUB_SHA   — set by Actions
-#   ECR_REGISTRY, ECR_REPOSITORY              — workflow env
+#   IMAGE_REGISTRY, IMAGE_REPOSITORY          — workflow env; the registry base
+#   ECR_REGISTRY, ECR_REPOSITORY              — legacy names for the same pair, still
+#                                               accepted (see emit_tags)
 #   INPUT_TAG                                 — dispatch override (main only)
 #   DEFAULT_BRANCH                            — defaults to `main`
 # Reads ./VERSION and the local tag database (checkout uses fetch-depth: 0,
@@ -34,7 +36,8 @@
 set -euo pipefail
 
 emit_tags() {
-  local version short_sha image_base primary released tags is_main safe_ref
+  local version short_sha image_base image_registry image_repository
+  local primary released tags is_main safe_ref
 
   # Most repos keep the version in a ./VERSION file. Where an earlier job
   # computes it instead (a version-management job that bumps and outputs it),
@@ -50,7 +53,21 @@ emit_tags() {
   fi
 
   short_sha="$(printf '%s' "${GITHUB_SHA:?GITHUB_SHA is required}" | cut -c1-7)"
-  image_base="${ECR_REGISTRY:?ECR_REGISTRY is required}/${ECR_REPOSITORY:?ECR_REPOSITORY is required}"
+  # The registry base. `IMAGE_REGISTRY`/`IMAGE_REPOSITORY` are the registry-neutral
+  # names; `ECR_REGISTRY`/`ECR_REPOSITORY` are the legacy pair and are still accepted,
+  # because this script is copied into sibling repos whose ECR push leg has not been cut
+  # yet (10 of its 11 copies on 2026-10-23). A repo that has been cut sets the neutral
+  # pair to its Harbor base, and nothing else in this script knows which registry it is.
+  # 🪤 The missing-variable check is EXPLICIT rather than `${X:?}`: with the fallback
+  # chain, `${IMAGE_REGISTRY:-${ECR_REGISTRY:?...}}` would report the legacy name for a
+  # repo that never sets it.
+  image_registry="${IMAGE_REGISTRY:-${ECR_REGISTRY:-}}"
+  image_repository="${IMAGE_REPOSITORY:-${ECR_REPOSITORY:-}}"
+  if [ -z "$image_registry" ] || [ -z "$image_repository" ]; then
+    echo "prepare-image-tags: IMAGE_REGISTRY/IMAGE_REPOSITORY (or the legacy ECR_REGISTRY/ECR_REPOSITORY) are required" >&2
+    return 1
+  fi
+  image_base="${image_registry}/${image_repository}"
 
   if [ "${GITHUB_REF:?GITHUB_REF is required}" = "refs/heads/${DEFAULT_BRANCH:-main}" ]; then
     is_main=true
@@ -490,6 +507,25 @@ selftest() {
   _check  RELEASE-PREFIX 'baska uzaydaki tag DONDURMAZ' 'sb/app:latest' "$out"
   out="$(RELEASE_TAG_PREFIX=eip-reconciler-v _run prefix2 0.2.0 eip-reconciler-v0.2.0 refs/heads/main main '')"
   _refute RELEASE-PREFIX2 'KENDI uzayindaki tag DONDURUR' 'sb/app:latest' "$out"
+
+  # REGISTRY-BASE — 2026-10-23, when the ECR leg started being cut repo by repo. The
+  # suite exports the LEGACY pair globally (above), so these three cases pin all three
+  # states of the fallback chain. Without the first one, pointing a cut repo at Harbor
+  # would silently keep publishing ECR names.
+  # 🪤 IMAGE_REPOSITORY'nin degeri ECR_REPOSITORY'den (global `sb/app`) FARKLI secildi.
+  # Ilk yazisimda ikisi de `sb/app`'ti ve bu, dusus zincirinin YALNIZ registry yarisini
+  # civiliyordu: yalnizca IMAGE_REPOSITORY'yi yoksayan bir mutant 86/0 ile HAYATTA KALDI
+  # (bagimsiz inceleme olctu). Iki yari ayri adlandirilinca ayni mutant oluyor.
+  out="$(IMAGE_REGISTRY=harbor.example.invalid IMAGE_REPOSITORY=hb/app _run neutral 0.3.0 - refs/heads/main main '')"
+  _check  BASE-NEUTRAL 'IMAGE_* ciftini KULLANIR'  'tags=harbor.example.invalid/hb/app:abcdef1' "$out"
+  _refute BASE-NEUTRAL 'ECR registry KULLANILMAZ'  'reg.example.invalid'                        "$out"
+  _refute BASE-NEUTRAL 'ECR repository KULLANILMAZ' '/sb/app:'                                  "$out"
+  out="$(_run legacy 0.3.0 - refs/heads/main main '')"
+  _check  BASE-LEGACY  'IMAGE_* yokken ECR_* ciftine DUSER' 'tags=reg.example.invalid/sb/app:abcdef1' "$out"
+  ECR_REGISTRY='' ECR_REPOSITORY='' _runrc nobase 0.3.0 - refs/heads/main main ''
+  _check  BASE-NONE 'iki cift de bossa REDDEDILIR' 'IMAGE_REGISTRY/IMAGE_REPOSITORY' "$out"
+  _refute BASE-NONE 'hic etiket uretilmedi'        'tags='                           "$out"
+  _rc_is  BASE-NONE 'cikis kodu 1' 1
 
   printf '=== prepare-image-tags --selftest: %d passed, %d failed ===\n' "$pass" "$fail"
   [ "$fail" -eq 0 ]
