@@ -1,4 +1,4 @@
-name: Build and Push to AWS ECR
+name: Build and Push to Harbor
 
 on:
   push:
@@ -14,13 +14,15 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: eu-central-1
-  ECR_REPOSITORY: sb/sportsbook-php-fpm
-  ECR_REGISTRY: 827604626727.dkr.ecr.eu-central-1.amazonaws.com
-  # Harbor receives the same repository PATH as ECR. The mirror step refuses to
-  # run if these two ever diverge, because a Harbor image published under a
-  # different path is not a copy of the ECR one, it is a second image nobody
-  # reconciles.
+  # The ONE registry since 2026-10-23 (Harbor was added in wave 2 as the second
+  # destination). 🔴 ORDER MATTERS AND IT IS ALREADY DONE: this image is a BASE image
+  # that other builds pull with `FROM`, so its CONSUMERS had to move first --
+  # kakbet/sportsbook-backoffice (three workflows) and kakbet/sportsbook-php-debug
+  # (its Dockerfile). Cutting this leg while a consumer still pulled from ECR would
+  # have frozen ECR's `:latest` and made that consumer compile against a stale base
+  # SILENTLY. Measured before the switch: all 11 tags ECR holds for this image exist
+  # in Harbor under the SAME digest; `latest` and `1.0.7` are both
+  # sha256:11c1526253cb5f1cae34f8d38c83ecac9a8b8c243f106d4a4eee8b11876d3444.
   HARBOR_REGISTRY: registry.everva.com.tr
   HARBOR_REPOSITORY: sb/sportsbook-php-fpm
   # 🔑 ONE source for the platform list. The build consumes it and so does the
@@ -127,17 +129,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-
     # Harbor credentials are a REPO secret: this org is on the free plan, where
     # an organization secret does not resolve in a private repository, and the
     # migration keeps one placement rule for every repo rather than two.
@@ -162,10 +153,16 @@ jobs:
         VERSION_VALUE: ${{ steps.version.outputs.version }}
         VERSION_SOURCE: allocated
         TAG_STYLE: docker-args
+        # The registry base every tag is built on. The script used to read the ECR
+        # pair; `IMAGE_REGISTRY`/`IMAGE_REPOSITORY` are the registry-neutral names it
+        # now prefers (the legacy `ECR_*` pair is still accepted, for the sibling
+        # repos whose ECR leg has not been cut yet).
+        IMAGE_REGISTRY: ${{ env.HARBOR_REGISTRY }}
+        IMAGE_REPOSITORY: ${{ env.HARBOR_REPOSITORY }}
       run: ./scripts/ci/prepare-image-tags.sh >> "$GITHUB_OUTPUT"
 
-    - name: Mirror the published tags onto Harbor
-      id: dual
+    - name: Check the shape of every published tag reference
+      id: refs
       # 🔑 The tag DECISION stays where it already is. prepare-image-tags.sh is the
       # one door that decides which names a run may publish, it is shared verbatim
       # with the sibling repos, and it is not touched here. This step re-decides
@@ -177,44 +174,65 @@ jobs:
       # script's own formatting — keeps ONE parser instead of two, and it is the
       # parser the sibling repos already exercise.
       # 🪤 Fail-closed on shape. A reference that is not exactly
-      # `$ECR_REGISTRY/$ECR_REPOSITORY:<tag>` stops the run instead of being quietly
-      # dropped — a dropped entry is a tag on ECR and not on Harbor, i.e. the silent
-      # half-migration this step exists to prevent. An EMPTY list stops it too.
+      # `$HARBOR_REGISTRY/$HARBOR_REPOSITORY:<tag>` stops the run instead of being
+      # quietly published: a name assembled from an empty or half-expanded variable is
+      # a tag nobody can pull. An EMPTY list stops it too.
+      # 🪤 2026-10-23: the pairing assertion (ECR_REPOSITORY == HARBOR_REPOSITORY) went
+      # with the ECR leg -- there is no second path left to pair -- but what it
+      # protected is still protected: every reference is anchored to HARBOR_REPOSITORY
+      # below, so this image cannot be published under another image's name.
       env:
-        ECR_TAGS: ${{ steps.tags.outputs.tags }}
+        PUBLISHED_TAGS: ${{ steps.tags.outputs.tags }}
         PRIMARY_TAG: ${{ steps.tags.outputs.primary_tag }}
+        # Bilerek ikinci el; gerekcesi asagidaki kapida.
+        EXPECT_REPOSITORY: sb/sportsbook-php-fpm
       run: |
         set -euo pipefail
-        ecr_base="$ECR_REGISTRY/$ECR_REPOSITORY"
+                # 🔑 IKINCI EL -- bu adimin en onemli satiri, ve ne OLMADIGINI da yaziyorum.
+        # Eskiden ECR<->Harbor yol esitligi iki BAGIMSIZ degiskeni capraz tutuyordu.
+        # ECR yarisi gidince sekil kapisi TOTOLOJIYE dondu: betige `IMAGE_REPOSITORY`
+        # olarak beslenen deger ile karsilastirilan deger AYNI degisken oldugu icin kapi
+        # yalnizca BOS/yarim-genislemis tabani yakalar, YANLIS AMA IYI-BICIMLI tabani
+        # yakalamaz (bagimsiz inceleme bunu kardes bir repoda mutasyonla olctu: depo
+        # yolunu baska bir imaja cevirince kapi GECTI).
+        # Bu dosyada tek imaj var, yani capraz tutulacak BAGIMSIZ bir ikinci kaynak YOK.
+        # Bu yuzden asagidaki `EXPECT_REPOSITORY` bilerek IKINCI BIR ELLE BAKILAN KOPYA
+        # -- eski ECR/Harbor cifti de tam olarak buydu. Yakaladigi sey: bir yarida
+        # yapilan yazim hatasi ya da yarim birakilmis bir tasima. Yakalamadigi sey:
+        # ikisinin birlikte yanlis yazilmasi. Harbor robotu dort projeye push
+        # yetkili oldugu icin iyi-bicimli bir yazim hatasi BASKA bir imajin etiketini
+        # ezebilir; kapi bunun icin var.
+        [ -n "${EXPECT_REPOSITORY:-}" ] || { echo "::error::EXPECT_REPOSITORY bos"; exit 1; }
+        [ "$HARBOR_REPOSITORY" = "$EXPECT_REPOSITORY" ] \
+          || { echo "::error::HARBOR_REPOSITORY='$HARBOR_REPOSITORY' beklenen depo '$EXPECT_REPOSITORY' ile uyusmuyor; iki yarinin biri yanlis yazilmis"; exit 1; }
         harbor_base="$HARBOR_REGISTRY/$HARBOR_REPOSITORY"
-        [ "$ECR_REPOSITORY" = "$HARBOR_REPOSITORY" ] || {
-          echo "::error::repository path mismatch: ECR_REPOSITORY='$ECR_REPOSITORY' but HARBOR_REPOSITORY='$HARBOR_REPOSITORY' — the two registries must use the same path"
-          exit 1
-        }
-        [ -n "${ECR_TAGS:-}" ]    || { echo "::error::prepare-image-tags produced no tags"; exit 1; }
-        [ -n "${PRIMARY_TAG:-}" ] || { echo "::error::prepare-image-tags produced no primary_tag"; exit 1; }
+        [ -n "${PUBLISHED_TAGS:-}" ] || { echo "::error::prepare-image-tags produced no tags"; exit 1; }
+        [ -n "${PRIMARY_TAG:-}" ]    || { echo "::error::prepare-image-tags produced no primary_tag"; exit 1; }
         all=""; n=0
         while IFS= read -r ref; do
           [ -n "$ref" ] || continue
           case "$ref" in
-            "$ecr_base":?*) : ;;
-            *) echo "::error::tag reference is not ${ecr_base}:<tag>: '$ref'"; exit 1 ;;
+            "$harbor_base":?*) : ;;
+            *) echo "::error::tag reference is not ${harbor_base}:<tag>: '$ref'"; exit 1 ;;
           esac
-          tag="${ref#"$ecr_base":}"
+          tag="${ref#"$harbor_base":}"
           case "$tag" in
             *:*|*/*) echo "::error::tag component is not a bare tag: '$tag'"; exit 1 ;;
           esac
-          all="${all:+$all,}${ref},${harbor_base}:${tag}"
+          all="${all:+$all,}${ref}"
           n=$((n + 1))
-        done <<< "$(printf '%s' "$ECR_TAGS" | tr ',' '\n')"
-        [ "$n" -gt 0 ] || { echo "::error::no tag survived the mirror step"; exit 1; }
+        done <<< "$(printf '%s' "$PUBLISHED_TAGS" | tr ',' '\n')"
+        [ "$n" -gt 0 ] || { echo "::error::no tag survived the shape check"; exit 1; }
         # Count what was actually built rather than trusting the loop that built it:
         # if the Harbor twin were ever dropped, every check downstream would still
         # pass on the ECR half and the gap would only surface at the digest gate —
         # i.e. AFTER the image had been published to one registry and not the other.
+        # Count what came OUT rather than trusting the loop that built it. With the ECR
+        # twin gone the expected ratio is 1:1, not 2:1 -- the check stays because a loop
+        # that silently drops an entry publishes fewer names than the fence allowed.
         refs_n="$(printf '%s' "$all" | tr ',' '\n' | grep -c .)"
-        [ "$refs_n" -eq "$((n * 2))" ] \
-          || { echo "::error::expected $((n * 2)) references for $n tag(s) but built $refs_n — an ECR tag lost its Harbor twin"; exit 1; }
+        [ "$refs_n" -eq "$n" ] \
+          || { echo "::error::expected $n reference(s) for $n tag(s) but built $refs_n"; exit 1; }
         # `ecr_ref`/`harbor_ref` below are what the verification gates inspect, and
         # they are assembled from PRIMARY_TAG. If that tag is not one this run
         # actually published, those gates would inspect an image this run never
@@ -223,8 +241,8 @@ jobs:
         # 🪤 The quotes around the middle of the pattern are a CHECK, not style: an
         # unquoted `$PRIMARY_TAG` is expanded as a glob by `case`, so a primary tag
         # of `*` would match any list and walk straight through this guard.
-        case ",$ECR_TAGS," in
-          *",$ecr_base:$PRIMARY_TAG,"*) : ;;
+        case ",$PUBLISHED_TAGS," in
+          *",$harbor_base:$PRIMARY_TAG,"*) : ;;
           *) echo "::error::primary_tag '$PRIMARY_TAG' is not among the tags this run published"; exit 1 ;;
         esac
         echo "$n published tag(s) -> $refs_n references:"
@@ -236,7 +254,6 @@ jobs:
           echo "tags=$all"
           echo "docker_args=$dargs"
           echo "count=$n"
-          echo "ecr_ref=${ecr_base}:${PRIMARY_TAG}"
           echo "harbor_ref=${harbor_base}:${PRIMARY_TAG}"
         } >> "$GITHUB_OUTPUT"
 
@@ -264,7 +281,7 @@ jobs:
           --platform "$PLATFORMS" \
           --progress=plain \
           --metadata-file "$meta" \
-          ${{ steps.dual.outputs.docker_args }} \
+          ${{ steps.refs.outputs.docker_args }} \
           .
         DIGEST="$(jq -r '."containerimage.digest"' "$meta")"
         if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
@@ -274,9 +291,9 @@ jobs:
         fi
         echo "Pushed digest: $DIGEST"
         echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-        echo "pushed: ${{ steps.dual.outputs.tags }}"
+        echo "pushed: ${{ steps.refs.outputs.tags }}"
 
-    - name: Verify ECR and Harbor carry the SAME manifest digest
+    - name: Verify Harbor serves exactly what this build pushed
       # This REPLACES the older single-registry check rather than sitting beside
       # it. That check asserted the right idea — a multi-arch publish can silently
       # degrade — but it read only the ECR reference and matched with `grep -qF`,
@@ -294,29 +311,28 @@ jobs:
       # 🔑 Anchored to the digest the BUILD produced, not just to agreement between
       # the registries: two references can agree and still both be an older image
       # if this run's push never landed.
+      # 🪤 2026-10-23: the cross-registry equality went with the ECR leg. Be exact,
+      # because the easy phrasing is wrong: this is NOT stronger than what it replaces.
+      # The old step WROTE TWO comparisons (ecr==harbor, ecr==BUILD_DIGEST) which imply
+      # a third by transitivity; what survives is the build-vs-registry axis that was
+      # ALREADY present. A subset, with no meaningful axis lost -- the axis that is gone
+      # (destination vs destination) is the weak one on its own, since the SAME wrong
+      # manifest in both registries would have satisfied it.
       env:
-        ECR_REF: ${{ steps.dual.outputs.ecr_ref }}
-        HARBOR_REF: ${{ steps.dual.outputs.harbor_ref }}
+        HARBOR_REF: ${{ steps.refs.outputs.harbor_ref }}
         BUILD_DIGEST: ${{ steps.build.outputs.digest }}
       run: |
         set -euo pipefail
-        digest_of() {
-          docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$1" | tr -d '"'
-        }
-        ecr_digest="$(digest_of "$ECR_REF")"
-        harbor_digest="$(digest_of "$HARBOR_REF")"
-        echo "ECR    $ECR_REF -> $ecr_digest"
-        echo "Harbor $HARBOR_REF -> $harbor_digest"
-        case "$ecr_digest"    in sha256:*) : ;; *) echo "::error::ECR digest is not a sha256 digest: '$ecr_digest'"; exit 1 ;; esac
-        case "$harbor_digest" in sha256:*) : ;; *) echo "::error::Harbor digest is not a sha256 digest: '$harbor_digest'"; exit 1 ;; esac
-        [ "$ecr_digest" = "$harbor_digest" ] \
-          || { echo "::error::digest mismatch between registries: ECR $ecr_digest vs Harbor $harbor_digest"; exit 1; }
-        case "$BUILD_DIGEST" in sha256:*) : ;; *) echo "::error::build step digest is not a sha256 digest: '$BUILD_DIGEST'"; exit 1 ;; esac
-        [ "$ecr_digest" = "$BUILD_DIGEST" ] \
-          || { echo "::error::registry digest $ecr_digest != the digest this build produced ($BUILD_DIGEST)"; exit 1; }
-        echo "OK: $ecr_digest is in both registries and is the digest this build produced"
+        served_digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "$HARBOR_REF" | tr -d '"')"
+        echo "pushed by build  -> $BUILD_DIGEST"
+        echo "served by Harbor -> $HARBOR_REF -> $served_digest"
+        case "$served_digest" in sha256:*) : ;; *) echo "::error::served digest is not a sha256 digest: '$served_digest'"; exit 1 ;; esac
+        case "$BUILD_DIGEST"  in sha256:*) : ;; *) echo "::error::build step digest is not a sha256 digest: '$BUILD_DIGEST'"; exit 1 ;; esac
+        [ "$served_digest" = "$BUILD_DIGEST" ] \
+          || { echo "::error::Harbor serves $served_digest but the build pushed $BUILD_DIGEST"; exit 1; }
+        echo "OK: Harbor serves exactly what this build pushed: $served_digest"
 
-    - name: Every requested platform present in BOTH registries
+    - name: Every requested platform present in Harbor
       # 🔑 `WANT_PLATFORMS` comes from the SAME `env.PLATFORMS` the build consumed,
       # so this gate can only ever assert what was actually requested. A constant
       # repeated here would be a second, independently editable copy — exactly the
@@ -330,8 +346,7 @@ jobs:
       # failing run does not first print `OK:` lines a reader would take at face
       # value.
       env:
-        ECR_REF: ${{ steps.dual.outputs.ecr_ref }}
-        HARBOR_REF: ${{ steps.dual.outputs.harbor_ref }}
+        HARBOR_REF: ${{ steps.refs.outputs.harbor_ref }}
         WANT_PLATFORMS: ${{ env.PLATFORMS }}
       run: |
         set -euo pipefail
@@ -343,15 +358,16 @@ jobs:
         done
         [ "${#want[@]}" -gt 0 ] \
           || { echo "::error::env.PLATFORMS produced no platform to check: '$WANT_PLATFORMS'"; exit 1; }
-        for ref in "$ECR_REF" "$HARBOR_REF"; do
-          out="$(docker buildx imagetools inspect "$ref")"
-          for q in "${want[@]}"; do
-            grep -q "Platform:  *$q\$" <<< "$out" \
-              || { printf '%s\n' "$out"
-                   echo "::error::$ref does not advertise $q"; exit 1; }
-          done
-          echo "OK: $ref advertises ${want[*]}"
+        # 🪤 This used to loop over "$ECR_REF" "$HARBOR_REF". With one reference left a
+        # one-element QUOTED loop is shellcheck SC2066 -- an error, not a style note --
+        # so the loop is removed rather than silenced.
+        out="$(docker buildx imagetools inspect "$HARBOR_REF")"
+        for q in "${want[@]}"; do
+          grep -q "Platform:  *$q\$" <<< "$out" \
+            || { printf '%s\n' "$out"
+                 echo "::error::$HARBOR_REF does not advertise $q"; exit 1; }
         done
+        echo "OK: $HARBOR_REF advertises ${want[*]}"
 
     - name: Update build name
       run: echo "::notice title=Build Complete::Successfully built and pushed version ${{ steps.version.outputs.version }}"
