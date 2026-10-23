@@ -56,8 +56,14 @@ emit_tags() {
   # The registry base. `IMAGE_REGISTRY`/`IMAGE_REPOSITORY` are the registry-neutral
   # names; `ECR_REGISTRY`/`ECR_REPOSITORY` are the legacy pair and are still accepted,
   # because this script is copied into sibling repos whose ECR push leg has not been cut
-  # yet (10 of its 11 copies on 2026-10-23). A repo that has been cut sets the neutral
-  # pair to its Harbor base, and nothing else in this script knows which registry it is.
+  # yet. A repo that has been cut sets the neutral pair to its Harbor base, and nothing
+  # else in this script knows which registry it is.
+  # 🚤 An earlier version of this comment carried a count -- "10 of its 11 copies" --
+  # and it was WRONG: measured 2026-10-24, the script lives in 15 repositories in two
+  # byte-distinct variants (5 cut, 10 not). A count written here goes stale in silence,
+  # so measure it instead of trusting this line:
+  #   git -C <clone> rev-parse origin/main:scripts/ci/prepare-image-tags.sh
+  # (identical hash == identical copy; group the hashes to get both populations).
   # 🪤 The missing-variable check is EXPLICIT rather than `${X:?}`: with the fallback
   # chain, `${IMAGE_REGISTRY:-${ECR_REGISTRY:?...}}` would report the legacy name for a
   # repo that never sets it.

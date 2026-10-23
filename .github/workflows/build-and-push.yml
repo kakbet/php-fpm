@@ -139,6 +139,19 @@ jobs:
         username: ${{ secrets.HARBOR_ROBOT_USER }}
         password: ${{ secrets.HARBOR_ROBOT_TOKEN }}
 
+    - name: Tag fence self-test (scripts/ci/prepare-image-tags.sh)
+      # 🔑 The tag fence's own suite, run as a GATE rather than on request. This
+      # script is the one door that decides which image names a run may publish, and
+      # measured 2026-10-24 its 87 assertions ran in exactly ONE of the 15 repositories
+      # that carry it -- every other copy's assertions were claims nobody checked on
+      # the way in. The suite is self-contained (`--selftest` builds its own git
+      # fixtures under `mktemp -d`) and needs no credentials, no registry, no network.
+      # 🪴 `--selftest` exits non-zero when any assertion fails. Measured by
+      # mutation: a one-line change to `image_base` turned "87 passed, 0 failed" (rc=0)
+      # into "78 passed, 9 failed" (rc=1). So this step IS the assertion and it must
+      # never be wrapped in `|| true`.
+      run: ./scripts/ci/prepare-image-tags.sh --selftest
+
     - name: Prepare Tags
       id: tags
       # 🔴 `:latest` was applied unconditionally, and this image is the BASE
