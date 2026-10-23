@@ -185,6 +185,7 @@ jobs:
         PUBLISHED_TAGS: ${{ steps.tags.outputs.tags }}
         PRIMARY_TAG: ${{ steps.tags.outputs.primary_tag }}
         # Bilerek ikinci el; gerekcesi asagidaki kapida.
+        EXPECT_REGISTRY: registry.everva.com.tr
         EXPECT_REPOSITORY: sb/sportsbook-php-fpm
       run: |
         set -euo pipefail
@@ -202,7 +203,16 @@ jobs:
         # ikisinin birlikte yanlis yazilmasi. Harbor robotu dort projeye push
         # yetkili oldugu icin iyi-bicimli bir yazim hatasi BASKA bir imajin etiketini
         # ezebilir; kapi bunun icin var.
+        # 🪤 REGISTRY yarisi da civili. Ilk yazisimda yalniz depo yarisi vardi ve bagimsiz
+        # inceleme `HARBOR_REGISTRY`yi baska bir adrese ceviren mutantin HAYATTA KALDIGINI
+        # olctu (rc=0). Sonucu yikici degildi -- yanlis registry'de robot kimligi calismaz,
+        # login/push duser, yani baska bir mekanizmayla fail-closed -- ama yorum okuyucuya
+        # ikinci elin iki yariyi da kapsadigini ima ediyordu. Artik gercekten kapsiyor ve
+        # hata GEC degil ERKEN, adiyla geliyor.
+        [ -n "${EXPECT_REGISTRY:-}" ]   || { echo "::error::EXPECT_REGISTRY bos"; exit 1; }
         [ -n "${EXPECT_REPOSITORY:-}" ] || { echo "::error::EXPECT_REPOSITORY bos"; exit 1; }
+        [ "$HARBOR_REGISTRY" = "$EXPECT_REGISTRY" ] \
+          || { echo "::error::HARBOR_REGISTRY='$HARBOR_REGISTRY' beklenen registry '$EXPECT_REGISTRY' ile uyusmuyor; iki yarinin biri yanlis yazilmis"; exit 1; }
         [ "$HARBOR_REPOSITORY" = "$EXPECT_REPOSITORY" ] \
           || { echo "::error::HARBOR_REPOSITORY='$HARBOR_REPOSITORY' beklenen depo '$EXPECT_REPOSITORY' ile uyusmuyor; iki yarinin biri yanlis yazilmis"; exit 1; }
         harbor_base="$HARBOR_REGISTRY/$HARBOR_REPOSITORY"
